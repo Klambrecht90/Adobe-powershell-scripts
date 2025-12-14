@@ -1,0 +1,130 @@
+$ErrorActionPreference = "Stop"
+ 
+Write-Host "=== Starting Adobe Acrobat (subscription) install ==="
+ 
+
+$procs = 'AcroRd32','Acrobat','AcroCEF','RdrCEF','AcroTray','AdobeCollabSync','AGMService','AGSService','armsvc'
+foreach ($p in $procs) {
+    Get-Process $p -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+}
+ 
+
+$packageRoot = "C:\Packages\AcrobatSub"
+$setup = Get-ChildItem -Path $packageRoot -Filter "setup.exe" -Recurse -ErrorAction SilentlyContinue |
+         Where-Object { $_.FullName -match "Adobe Acrobat\\setup\.exe$" -or $_.DirectoryName -match "Adobe Acrobat$" } |
+         Select-Object -First 1
+ 
+if (-not $setup) {
+    Write-Host "❌ setup.exe not found under $packageRoot"
+    exit 1
+}
+ 
+Write-Host "Found installer: $($setup.FullName)"
+ 
+
+$args = '/sALL /reboot=ReallySuppress /msi EULA_ACCEPT=YES ENABLE_CHROMEEXT=0'
+Write-Host "Running installer with arguments: $args"
+$p = Start-Process -FilePath $setup.FullName -ArgumentList $args -Wait -PassThru
+ 
+Write-Host "Installer exited with code $($p.ExitCode)"
+ 
+
+Start-Sleep 5
+$acro = Get-ItemProperty "HKLM:\SOFTWARE\Adobe\Adobe Acrobat\*\" -ErrorAction SilentlyContinue
+if ($acro.DisplayVersion -match "^25\.") {
+    Write-Host "✅ Successfully installed Adobe Acrobat (subscription) version $($acro.DisplayVersion)"
+    exit 0
+} else {
+    Write-Host "⚠️ Install may have failed or incorrect version detected."
+    exit 1
+}
+ 
+powershell -ExecutionPolicy Bypass -File "C:\Packages\AcrobatSub\Install-AdobeSubscription.ps1"
+ 
+<# Install Adobe Acrobat (Subscription/Continuous) silently
+   Works for in-place upgrade from 2020 or clean install
+   Run as: Admin or Intune SYSTEM
+   Logs: C:\ProgramData\Company\Logs\Acrobat_SubInstall.log
+#>
+ 
+$ErrorActionPreference = 'Stop'
+$ProgressPreference    = 'SilentlyContinue'
+ 
+# ------- Logging -------
+$Log = 'C:\ProgramData\Company\Logs\Acrobat_SubInstall.log'
+New-Item -ItemType Directory -Force -Path (Split-Path $Log) | Out-Null
+Start-Transcript -Path $Log -Append | Out-Null
+function Info($m){ Write-Output "$(Get-Date -f o) [INFO] $m" }
+function Fail($m){ Write-Output "$(Get-Date -f o) [ERROR] $m"; Stop-Transcript | Out-Null; exit 1 }
+ 
+# ------- Where is the package? -------
+function Get-PkgRoot {
+  if ($PSScriptRoot) { return $PSScriptRoot }
+  if ($MyInvocation.MyCommand.Path) { return (Split-Path -Parent $MyInvocation.MyCommand.Path) }
+  return (Get-Location).Path
+}
+$PkgRoot = Get-PkgRoot
+Info "Package root: $PkgRoot"
+ 
+# ------- Find Adobe setup.exe (buried under Build\Setup\APRO*\Adobe Acrobat) -------
+function Find-AcrobatSetup {
+  $candidates = @(
+    (Join-Path $PkgRoot 'setup.exe'),
+    (Join-Path $PkgRoot 'Intune deployment\Build\Setup'),
+    (Join-Path $PkgRoot 'Build\Setup')
+  )
+  foreach($p in $candidates){
+    if (Test-Path $p -PathType Leaf) { return $p }
+    if (Test-Path $p -PathType Container){
+      $hit = Get-ChildItem -Path $p -Filter 'setup.exe' -Recurse -ErrorAction SilentlyContinue |
+             Where-Object { $_.FullName -match 'Adobe Acrobat\\setup\.exe$' -or $_.DirectoryName -match 'Adobe Acrobat$' } |
+             Select-Object -First 1
+      if ($hit) { return $hit.FullName }
+    }
+  }
+  $any = Get-ChildItem -Path $PkgRoot -Filter 'setup.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($any) { return $any.FullName }
+  return $null
+}
+ 
+$Setup = Find-AcrobatSetup
+if (-not $Setup) { Fail "setup.exe not found anywhere under $PkgRoot" }
+Info "Installer: $Setup"
+ 
+# ------- Prep: close Adobe processes, ensure Config.Msi is writable -------
+$procs = 'AcroRd32','RdrCEF','Acrobat','AcroCEF','AcroTray','AdobeCollabSync','AGMService','AGSService','armsvc','Setup'
+foreach($p in $procs){ Get-Process $p -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }
+try{
+  if (-not (Test-Path 'C:\Config.Msi')) { New-Item -ItemType Directory -Path 'C:\Config.Msi' | Out-Null }
+  attrib -s -h 'C:\Config.Msi' 2>$null
+  icacls 'C:\Config.Msi' /inheritance:e *> $null
+  icacls 'C:\Config.Msi' /grant *S-1-5-18:(OI)(CI)F Administrators:(OI)(CI)F /T *> $null
+  Info "C:\Config.Msi permissions ensured."
+}catch{ Info "Config.Msi permission tweak skipped: $($_.Exception.Message)" }
+ 
+# ------- Install (in-place upgrade or clean) -------
+$Args = '/sALL /reboot=ReallySuppress /msi EULA_ACCEPT=YES ENABLE_CHROMEEXT=0'
+Info "Launching installer with: $Args"
+$proc = Start-Process -FilePath $Setup -ArgumentList $Args -Wait -PassThru
+Info "Installer exit code: $($proc.ExitCode)"
+if ($proc.ExitCode -ne 0 -and $proc.ExitCode -ne 3010) { Fail "Installer reported failure ($($proc.ExitCode))" }
+ 
+# ------- Verify -------
+$RegKey = 'HKLM:\SOFTWARE\Adobe\Adobe Acrobat\DC\Installer'
+$Target = [version]'25.001.20756'
+$ver = $null
+try { $pv = (Get-ItemProperty $RegKey -ErrorAction Stop).ProductVersion; if($pv){ $ver = [version]$pv } } catch {}
+if (-not $ver) {
+  $exe = 'C:\Program Files\Adobe\Acrobat\Acrobat\Acrobat.exe'
+  if (Test-Path $exe){ try { $ver = (Get-Item $exe).VersionInfo.FileVersionRaw } catch {} }
+}
+ 
+if (-not $ver) { Fail 'Post-install detection failed—no Acrobat version found.' }
+Info "Detected Acrobat version: $ver"
+if ($ver -lt $Target) { Fail "Installed $ver but expected >= $Target" }
+ 
+Info '✅ Adobe Acrobat (subscription) installed successfully.'
+Stop-Transcript | Out-Null
+exit 0
+ 
+ 
