@@ -1,1 +1,5 @@
+$ScriptRoot = Spilt-Path - Parent
+$MyInvocation.MyCommand.Path
 
+"$ScriptRoot\helpers\adobe-helper1.ps1"
+"$ScriptRoot\helpers\adobe-helper2.ps1"
