@@ -1,0 +1,71 @@
+$ErrorActionPreference = "SilentlyContinue"
+Write-Host "=== Starting Adobe 2020 removal ==="
+ 
+
+$procs = 'AcroRd32','Acrobat','AcroCEF','RdrCEF','AcroTray','AdobeCollabSync','armsvc','AGMService','AGSService'
+foreach ($p in $procs) {
+    Get-Process $p -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+}
+ 
+
+$found = @()
+$regPaths = @(
+  "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+  "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+)
+ 
+foreach ($path in $regPaths) {
+    $apps = Get-ItemProperty $path -ErrorAction SilentlyContinue | Where-Object {
+        ($_.DisplayName -match "Acrobat" -or $_.DisplayName -match "Reader") -and
+        ($_.DisplayName -match "2020" -or $_.DisplayVersion -match "^20\.")
+    }
+    if ($apps) { $found += $apps }
+}
+ 
+if ($found.Count -eq 0) {
+    Write-Host "No Acrobat/Reader 2020 installation detected."
+    exit 0
+}
+ 
+
+foreach ($app in $found) {
+    Write-Host "Found: $($app.DisplayName)  Version: $($app.DisplayVersion)"
+    $cmd = $null
+ 
+    if ($app.UninstallString) {
+        if ($app.UninstallString -match "MsiExec") {
+            $msi = $app.UninstallString -replace ".*({.*}).*", '$1'
+            if ($msi -match "{.*}") {
+                $cmd = "msiexec.exe /x $msi /qn /norestart"
+            } else {
+                $cmd = "$($app.UninstallString) /quiet /norestart"
+            }
+        } else {
+            $cmd = "$($app.UninstallString) /quiet /norestart"
+        }
+ 
+        if ($cmd) {
+            Write-Host "Running uninstall command: $cmd"
+            Start-Process "cmd.exe" -ArgumentList "/c $cmd" -Wait
+        }
+    }
+}
+ 
+
+Start-Sleep 5
+$stillThere = $false
+foreach ($path in $regPaths) {
+    $check = Get-ItemProperty $path -ErrorAction SilentlyContinue | Where-Object {
+        ($_.DisplayName -match "Acrobat" -or $_.DisplayName -match "Reader") -and
+        ($_.DisplayName -match "2020" -or $_.DisplayVersion -match "^20\.")
+    }
+    if ($check) { $stillThere = $true }
+}
+ 
+if (-not $stillThere) {
+    Write-Host "✅ Adobe Acrobat/Reader 2020 successfully uninstalled."
+    exit 0
+} else {
+    Write-Host "⚠️  Some Adobe 2020 components may remain."
+    exit 1
+}
